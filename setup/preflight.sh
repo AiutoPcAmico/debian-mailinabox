@@ -8,7 +8,7 @@ if [[ $EUID -ne 0 ]]; then
 	exit 1
 fi
 
-# Check that we are running on Ubuntu 20.04 LTS (or 20.04.xx).
+# Check that we are running on Debian 12.
 if [ "$(lsb_release --id --short)" != "Debian" ] || [ "$(lsb_release --release --short)" != "12" ]; then
 	echo "Debian Mail-in-a-Box only supports being installed on Debian 12, sorry. You are running:"
 	echo
