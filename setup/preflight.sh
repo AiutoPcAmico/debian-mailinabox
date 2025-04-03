@@ -1,3 +1,4 @@
+#!/bin/bash
 # Are we running as root?
 if [[ $EUID -ne 0 ]]; then
 	echo "This script must be run as root. Please re-run like this:"
@@ -11,7 +12,7 @@ fi
 if [ "$(lsb_release --id --short)" != "Debian" ] || [ "$(lsb_release --release --short)" != "12" ]; then
 	echo "Debian Mail-in-a-Box only supports being installed on Debian 12, sorry. You are running:"
 	echo
-	lsb_release --description --short
+	echo "${OS_RELEASE_ID:-"Unknown linux distribution"} ${OS_RELEASE_VERSION_ID:-}"
 	echo
 	echo "We can't write scripts that run on every possible setup, sorry."
 	exit 1
@@ -36,7 +37,7 @@ if [ $TOTAL_PHYSICAL_MEM -lt 400000 ]; then
 		exit
 	fi
 fi
-if [ $TOTAL_PHYSICAL_MEM -lt 750000 ]; then
+if [ "$TOTAL_PHYSICAL_MEM" -lt 750000 ]; then
 	echo "WARNING: Your Mail-in-a-Box has less than 768 MB of memory."
 	echo "         It might run unreliably when under heavy load."
 fi

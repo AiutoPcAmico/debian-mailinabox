@@ -9,7 +9,9 @@
 # Python 3 in setup/questions.sh to validate the email
 # address entered by the user.
 
-import subprocess, shutil, os, sqlite3, re
+import os, sqlite3, re
+import subprocess
+
 import utils
 from email_validator import validate_email as validate_email_, EmailNotValidError
 import idna
@@ -86,10 +88,7 @@ def prettify_idn_email_address(email):
 
 def is_dcv_address(email):
 	email = email.lower()
-	for localpart in ("admin", "administrator", "postmaster", "hostmaster", "webmaster", "abuse"):
-		if email.startswith(localpart+"@") or email.startswith(localpart+"+"):
-			return True
-	return False
+	return any(email.startswith((localpart + "@", localpart + "+")) for localpart in ("admin", "administrator", "postmaster", "hostmaster", "webmaster", "abuse"))
 
 def open_database(env, with_connection=False):
 	conn = sqlite3.connect(env["STORAGE_ROOT"] + "/mail/users.sqlite")
@@ -104,6 +103,18 @@ def get_mail_users(env):
 	c.execute('SELECT email FROM users')
 	users = [ row[0] for row in c.fetchall() ]
 	return utils.sort_email_addresses(users, env)
+
+def sizeof_fmt(num):
+	for unit in ['','K','M','G','T']:
+		if abs(num) < 1024.0:
+			if abs(num) > 99:
+				return "%3.0f%s" % (num, unit)
+			else:
+				return "%2.1f%s" % (num, unit)
+
+		num /= 1024.0
+
+	return str(num)
 
 def get_mail_users_ex(env, with_archived=False):
 	# Returns a complex data structure of all user accounts, optionally
@@ -128,13 +139,42 @@ def get_mail_users_ex(env, with_archived=False):
 	users = []
 	active_accounts = set()
 	c = open_database(env)
-	c.execute('SELECT email, privileges FROM users')
-	for email, privileges in c.fetchall():
+	c.execute('SELECT email, privileges, quota FROM users')
+	for email, privileges, quota in c.fetchall():
 		active_accounts.add(email)
+
+		(user, domain) = email.split('@')
+		box_size = 0
+		box_quota = 0
+		percent = ''
+		try:
+			dirsize_file = os.path.join(env['STORAGE_ROOT'], 'mail/mailboxes/%s/%s/maildirsize' % (domain, user))
+			with open(dirsize_file, 'r') as f:
+				box_quota = int(f.readline().split('S')[0])
+				for line in f.readlines():
+					(size, count) = line.split(' ')
+					box_size += int(size)
+
+			try:
+				percent = (box_size / box_quota) * 100
+			except:
+				percent = 'Error'
+
+		except:
+			box_size = '?'
+			box_quota = '?'
+			percent = '?'
+
+		if quota == '0':
+			percent = ''
 
 		user = {
 			"email": email,
 			"privileges": parse_privs(privileges),
+            "quota": quota,
+			"box_quota": box_quota,
+			"box_size": sizeof_fmt(box_size) if box_size != '?' else box_size,
+			"percent": '%3.0f%%' % percent if type(percent) != str else percent,
 			"status": "active",
 		}
 		users.append(user)
@@ -153,6 +193,9 @@ def get_mail_users_ex(env, with_archived=False):
 						"privileges": [],
 						"status": "inactive",
 						"mailbox": mbox,
+                        "box_size": '?',
+                        "box_quota": '?',
+                        "percent": '?',
 					}
 					users.append(user)
 
@@ -192,8 +235,7 @@ def get_mail_aliases(env):
 	aliases = { row[0]: row for row in c.fetchall() } # make dict
 
 	# put in a canonical order: sort by domain, then by email address lexicographically
-	aliases = [ aliases[address] for address in utils.sort_email_addresses(aliases.keys(), env) ]
-	return aliases
+	return [ aliases[address] for address in utils.sort_email_addresses(aliases.keys(), env) ]
 
 def get_mail_aliases_ex(env):
 	# Returns a complex data structure of all mail aliases, similar
@@ -225,7 +267,7 @@ def get_mail_aliases_ex(env):
 		domain = get_domain(address)
 
 		# add to list
-		if not domain in domains:
+		if domain not in domains:
 			domains[domain] = {
 				"domain": domain,
 				"aliases": [],
@@ -270,7 +312,7 @@ def get_mail_domains(env, filter_aliases=lambda alias : True, users_only=False):
 		domains.extend([get_domain(address, as_unicode=False) for address, _, _, auto in get_mail_aliases(env) if filter_aliases(address) and not auto ])
 	return set(domains)
 
-def add_mail_user(email, pw, privs, env):
+def add_mail_user(email, pw, privs, quota, env):
 	# validate email
 	if email.strip() == "":
 		return ("No email address provided.", 400)
@@ -296,6 +338,14 @@ def add_mail_user(email, pw, privs, env):
 			validation = validate_privilege(p)
 			if validation: return validation
 
+	if quota is None:
+		quota = '0'
+
+	try:
+		quota = validate_quota(quota)
+	except ValueError as e:
+		return (str(e), 400)
+
 	# get the database
 	conn, c = open_database(env, with_connection=True)
 
@@ -304,13 +354,15 @@ def add_mail_user(email, pw, privs, env):
 
 	# add the user to the database
 	try:
-		c.execute("INSERT INTO users (email, password, privileges) VALUES (?, ?, ?)",
-			(email, pw, "\n".join(privs)))
+		c.execute("INSERT INTO users (email, password, privileges, quota) VALUES (?, ?, ?, ?)",
+			(email, pw, "\n".join(privs), quota))
 	except sqlite3.IntegrityError:
 		return ("User already exists.", 400)
 
 	# write databasebefore next step
 	conn.commit()
+
+	dovecot_quota_recalc(email)
 
 	# Update things in case any new domains are added.
 	return kick(env, "mail user added")
@@ -335,6 +387,55 @@ def hash_password(pw):
 	# something like "{SCHEME}hashedpassworddata".
 	# http://wiki2.dovecot.org/Authentication/PasswordSchemes
 	return utils.shell('check_output', ["/usr/bin/doveadm", "pw", "-s", "SHA512-CRYPT", "-p", pw]).strip()
+
+
+def get_mail_quota(email, env):
+	conn, c = open_database(env, with_connection=True)
+	c.execute("SELECT quota FROM users WHERE email=?", (email,))
+	rows = c.fetchall()
+	if len(rows) != 1:
+		return ("That's not a user (%s)." % email, 400)
+
+	return rows[0][0]
+
+
+def set_mail_quota(email, quota, env):
+	# validate that password is acceptable
+	quota = validate_quota(quota)
+
+	# update the database
+	conn, c = open_database(env, with_connection=True)
+	c.execute("UPDATE users SET quota=? WHERE email=?", (quota, email))
+	if c.rowcount != 1:
+		return ("That's not a user (%s)." % email, 400)
+	conn.commit()
+
+	dovecot_quota_recalc(email)
+
+	return "OK"
+
+def dovecot_quota_recalc(email):
+	# dovecot processes running for the user will not recognize the new quota setting
+	# a reload is necessary to reread the quota setting, but it will also shut down
+	# running dovecot processes.  Email clients generally log back in when they lose
+	# a connection.
+	# subprocess.call(['doveadm', 'reload'])
+
+	# force dovecot to recalculate the quota info for the user.
+	subprocess.call(["doveadm", "quota", "recalc", "-u", email])
+
+def validate_quota(quota):
+	# validate quota
+	quota = quota.strip().upper()
+
+	if quota == "":
+		raise ValueError("No quota provided.")
+	if re.search(r"[\s,.]", quota):
+		raise ValueError("Quotas cannot contain spaces, commas, or decimal points.")
+	if not re.match(r'^[\d]+[GM]?$', quota):
+		raise ValueError("Invalid quota.")
+
+	return quota
 
 def get_mail_password(email, env):
 	# Gets the hashed password for a user. Passwords are stored in Dovecot's
@@ -477,10 +578,7 @@ def add_mail_alias(address, forwards_to, permitted_senders, env, update_if_exist
 
 	forwards_to = ",".join(validated_forwards_to)
 
-	if len(validated_permitted_senders) == 0:
-		permitted_senders = None
-	else:
-		permitted_senders = ",".join(validated_permitted_senders)
+	permitted_senders = None if len(validated_permitted_senders) == 0 else ",".join(validated_permitted_senders)
 
 	conn, c = open_database(env, with_connection=True)
 	try:
@@ -498,6 +596,7 @@ def add_mail_alias(address, forwards_to, permitted_senders, env, update_if_exist
 	if do_kick:
 		# Update things in case any new domains are added.
 		return kick(env, return_status)
+	return None
 
 def remove_mail_alias(address, env, do_kick=True):
 	# convert Unicode domain to IDNA
@@ -513,10 +612,11 @@ def remove_mail_alias(address, env, do_kick=True):
 	if do_kick:
 		# Update things in case any domains are removed.
 		return kick(env, "alias removed")
+	return None
 
 def add_auto_aliases(aliases, env):
 	conn, c = open_database(env, with_connection=True)
-	c.execute("DELETE FROM auto_aliases");
+	c.execute("DELETE FROM auto_aliases")
 	for source, destination in aliases.items():
 		c.execute("INSERT INTO auto_aliases (source, destination) VALUES (?, ?)", (source, destination))
 	conn.commit()
@@ -566,7 +666,7 @@ def kick(env, mail_result=None):
 
 	auto_aliases = { }
 
-	# Mape required aliases to the administrator alias (which should be created manually).
+	# Map required aliases to the administrator alias (which should be created manually).
 	administrator = get_system_administrator(env)
 	required_aliases = get_required_aliases(env)
 	for alias in required_aliases:
@@ -586,14 +686,14 @@ def kick(env, mail_result=None):
 
 	# Remove auto-generated postmaster/admin/abuse alises from the main aliases table.
 	# They are now stored in the auto_aliases table.
-	for address, forwards_to, permitted_senders, auto in get_mail_aliases(env):
+	for address, forwards_to, _permitted_senders, auto in get_mail_aliases(env):
 		user, domain = address.split("@")
-		if user in ("postmaster", "admin", "abuse") \
+		if user in {"postmaster", "admin", "abuse"} \
 			and address not in required_aliases \
 			and forwards_to == get_system_administrator(env) \
 			and not auto:
 			remove_mail_alias(address, env, do_kick=False)
-			results.append("removed alias %s (was to %s; domain no longer used for email)\n" % (address, forwards_to))
+			results.append(f"removed alias {address} (was to {forwards_to}; domain no longer used for email)\n")
 
 	# Update DNS and nginx in case any domains are added/removed.
 
@@ -608,9 +708,11 @@ def kick(env, mail_result=None):
 def validate_password(pw):
 	# validate password
 	if pw.strip() == "":
-		raise ValueError("No password provided.")
+		msg = "No password provided."
+		raise ValueError(msg)
 	if len(pw) < 8:
-		raise ValueError("Passwords must be at least eight characters.")
+		msg = "Passwords must be at least eight characters."
+		raise ValueError(msg)
 
 if __name__ == "__main__":
 	import sys
