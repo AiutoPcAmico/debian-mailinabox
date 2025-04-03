@@ -11,6 +11,11 @@ Where:
 
 =========
 
+Version 71.1.0 (April 03, 2025)
+------------------------------
+
+* Imported commit from upstream project
+
 Version 67.2.0 (January 28, 2024)
 ------------------------------
 

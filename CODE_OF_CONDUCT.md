@@ -45,4 +45,3 @@ Because the need for confidentiality for all parties involved in an enforcement 
 ## Attribution
 
 This Code of Conduct is adapted from the [Contributor Covenant, version 1.4](http://contributor-covenant.org/version/1/4) and the code of conduct of [Code for DC](http://codefordc.org/resources/codeofconduct.html).
-
