@@ -236,4 +236,5 @@ else
 	echo "Ok, I won't disable the greylist function"
 	greylistDisabled=false
 fi
+clear
 # END AiutoPcAmico modification
