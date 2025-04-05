@@ -7,7 +7,7 @@ Original project: [https://github.com/mailinabox/mailinabox](https://github.com/
 
 ## Version
 
-Current version: v71.1.0-AiutoPcAmico
+Current version: v71.1.1-AiutoPcAmico
 Upstream current implemented version: v71a
 
 ## Changes implemented

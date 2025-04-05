@@ -11,6 +11,11 @@ Where:
 
 =========
 
+Version 71.1.1 (April 05, 2025)
+------------------------------
+
+* Enforced Jail2ban configuration (bantime incremented to 3600s and reduced maxretry for SMTPS ports)
+
 Version 71.1.0 (April 03, 2025)
 ------------------------------
 
