@@ -4,7 +4,8 @@
 import os, os.path, re, shutil, subprocess, tempfile
 
 from utils import shell, safe_domain_name, sort_domains
-import idna
+import functools
+import operator
 
 # SELECTING SSL CERTIFICATES FOR USE IN WEB
 
@@ -13,7 +14,7 @@ def get_ssl_certificates(env):
 	# that the certificates are good for to the best certificate for
 	# the domain.
 
-	from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
+	from cryptography.hazmat.primitives.asymmetric import dsa, rsa, ec
 	from cryptography.x509 import Certificate
 
 	# The certificates are all stored here:
@@ -58,13 +59,15 @@ def get_ssl_certificates(env):
 			# Not a valid PEM format for a PEM type we care about.
 			continue
 
-		# Is it a private key?
-		if isinstance(pem, RSAPrivateKey):
-			private_keys[pem.public_key().public_numbers()] = { "filename": fn, "key": pem }
-
 		# Is it a certificate?
 		if isinstance(pem, Certificate):
 			certificates.append({ "filename": fn, "cert": pem })
+		# It is a private key
+		elif (isinstance(pem, rsa.RSAPrivateKey)
+			or isinstance(pem, dsa.DSAPrivateKey)
+			or isinstance(pem, ec.EllipticCurvePrivateKey)):
+			private_keys[pem.public_key().public_numbers()] = { "filename": fn, "key": pem }
+
 
 	# Process the certificates.
 	domains = { }
@@ -83,9 +86,8 @@ def get_ssl_certificates(env):
 		for domain in cert_domains:
 			# The primary hostname can only use a certificate mapped
 			# to the system private key.
-			if domain == env['PRIMARY_HOSTNAME']:
-				if cert["private_key"]["filename"] != os.path.join(env['STORAGE_ROOT'], 'ssl', 'ssl_private_key.pem'):
-					continue
+			if domain == env['PRIMARY_HOSTNAME'] and cert["private_key"]["filename"] != os.path.join(env['STORAGE_ROOT'], 'ssl', 'ssl_private_key.pem'):
+				continue
 
 			domains.setdefault(domain, []).append(cert)
 
@@ -150,13 +152,12 @@ def get_domain_ssl_files(domain, ssl_certificates, env, allow_missing_cert=False
 			"certificate_object": load_pem(load_cert_chain(ssl_certificate)[0]),
 		}
 
-	if use_main_cert:
-		if domain == env['PRIMARY_HOSTNAME']:
-			# The primary domain must use the server certificate because
-			# it is hard-coded in some service configuration files.
-			return system_certificate
+	if use_main_cert and domain == env['PRIMARY_HOSTNAME']:
+		# The primary domain must use the server certificate because
+		# it is hard-coded in some service configuration files.
+		return system_certificate
 
-	wildcard_domain = re.sub("^[^\.]+", "*", domain)
+	wildcard_domain = re.sub(r"^[^\.]+", "*", domain)
 	if domain in ssl_certificates:
 		return ssl_certificates[domain]
 	elif wildcard_domain in ssl_certificates:
@@ -212,7 +213,7 @@ def get_certificates_to_provision(env, limit_domains=None, show_valid_certs=True
 				if not value: continue # IPv6 is not configured
 				response = query_dns(domain, rtype)
 				if response != normalize_ip(value):
-					bad_dns.append("%s (%s)" % (response, rtype))
+					bad_dns.append(f"{response} ({rtype})")
 
 			if bad_dns:
 				domains_cant_provision[domain] = "The domain name does not resolve to this machine: " \
@@ -265,11 +266,11 @@ def provision_certificates(env, limit_domains):
 	# primary domain listed in each certificate.
 	from dns_update import get_dns_zones
 	certs = { }
-	for zone, zonefile in get_dns_zones(env):
+	for zone, _zonefile in get_dns_zones(env):
 		certs[zone] = [[]]
 	for domain in sort_domains(domains, env):
 		# Does the domain end with any domain we've seen so far.
-		for parent in certs.keys():
+		for parent in certs:
 			if domain.endswith("." + parent):
 				# Add this to the parent's list of domains.
 				# Start a new group if the list already has
@@ -286,7 +287,7 @@ def provision_certificates(env, limit_domains):
 
 	# Flatten to a list of lists of domains (from a mapping). Remove empty
 	# lists (zones with no domains that need certs).
-	certs = sum(certs.values(), [])
+	certs = functools.reduce(operator.iadd, certs.values(), [])
 	certs = [_ for _ in certs if len(_) > 0]
 
 	# Prepare to provision.
@@ -414,7 +415,7 @@ def create_csr(domain, ssl_key, country_code, env):
 				"openssl", "req", "-new",
 				"-key", ssl_key,
 				"-sha256",
-				"-subj", "/C=%s/CN=%s" % (country_code, domain)])
+				"-subj", f"/C={country_code}/CN={domain}"])
 
 def install_cert(domain, ssl_cert, ssl_chain, env, raw=False):
 	# Write the combined cert+chain to a temporary path and validate that it is OK.
@@ -435,7 +436,7 @@ def install_cert(domain, ssl_cert, ssl_chain, env, raw=False):
 			cert_status += " " + cert_status_details
 		return cert_status
 
-	# Copy certifiate into ssl directory.
+	# Copy certificate into ssl directory.
 	install_cert_copy_file(fn, env)
 
 	# Run post-install steps.
@@ -450,8 +451,8 @@ def install_cert_copy_file(fn, env):
 	from cryptography.hazmat.primitives import hashes
 	from binascii import hexlify
 	cert = load_pem(load_cert_chain(fn)[0])
-	all_domains, cn = get_certificate_domains(cert)
-	path = "%s-%s-%s.pem" % (
+	_all_domains, cn = get_certificate_domains(cert)
+	path = "{}-{}-{}.pem".format(
 		safe_domain_name(cn), # common name, which should be filename safe because it is IDNA-encoded, but in case of a malformed cert make sure it's ok to use as a filename
 		cert.not_valid_after.date().isoformat().replace("-", ""), # expiration date
 		hexlify(cert.fingerprint(hashes.SHA256())).decode("ascii")[0:8], # fingerprint prefix
@@ -506,7 +507,7 @@ def check_certificate(domain, ssl_certificate, ssl_private_key, warn_if_expiring
 	# Check that the ssl_certificate & ssl_private_key files are good
 	# for the provided domain.
 
-	from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
+	from cryptography.hazmat.primitives.asymmetric import rsa, dsa, ec
 	from cryptography.x509 import Certificate
 
 	# The ssl_certificate file may contain a chain of certificates. We'll
@@ -522,12 +523,12 @@ def check_certificate(domain, ssl_certificate, ssl_private_key, warn_if_expiring
 	# First check that the domain name is one of the names allowed by
 	# the certificate.
 	if domain is not None:
-		certificate_names, cert_primary_name = get_certificate_domains(cert)
+		certificate_names, _cert_primary_name = get_certificate_domains(cert)
 
 		# Check that the domain appears among the acceptable names, or a wildcard
 		# form of the domain name (which is a stricter check than the specs but
 		# should work in normal cases).
-		wildcard_domain = re.sub("^[^\.]+", "*", domain)
+		wildcard_domain = re.sub(r"^[^\.]+", "*", domain)
 		if domain not in certificate_names and wildcard_domain not in certificate_names:
 			return ("The certificate is for the wrong domain name. It is for %s."
 				% ", ".join(sorted(certificate_names)), None)
@@ -538,9 +539,11 @@ def check_certificate(domain, ssl_certificate, ssl_private_key, warn_if_expiring
 			with open(ssl_private_key, 'rb') as f:
 				priv_key = load_pem(f.read())
 		except ValueError as e:
-			return ("The private key file %s is not a private key file: %s" % (ssl_private_key, str(e)), None)
+			return (f"The private key file {ssl_private_key} is not a private key file: {e!s}", None)
 
-		if not isinstance(priv_key, RSAPrivateKey):
+		if (not isinstance(priv_key, rsa.RSAPrivateKey)
+			and not isinstance(priv_key, dsa.DSAPrivateKey)
+			and not isinstance(priv_key, ec.EllipticCurvePrivateKey)):
 			return ("The private key file %s is not a private key file." % ssl_private_key, None)
 
 		if priv_key.public_key().public_numbers() != cert.public_key().public_numbers():
@@ -566,7 +569,7 @@ def check_certificate(domain, ssl_certificate, ssl_private_key, warn_if_expiring
 	import datetime
 	now = datetime.datetime.utcnow()
 	if not(cert.not_valid_before <= now <= cert.not_valid_after):
-		return ("The certificate has expired or is not yet valid. It is valid from %s to %s." % (cert.not_valid_before, cert.not_valid_after), None)
+		return (f"The certificate has expired or is not yet valid. It is valid from {cert.not_valid_before} to {cert.not_valid_after}.", None)
 
 	# Next validate that the certificate is valid. This checks whether the certificate
 	# is self-signed, that the chain of trust makes sense, that it is signed by a CA
@@ -625,7 +628,8 @@ def load_cert_chain(pemfile):
 		pem = f.read() + b"\n" # ensure trailing newline
 		pemblocks = re.findall(re_pem, pem)
 		if len(pemblocks) == 0:
-			raise ValueError("File does not contain valid PEM data.")
+			msg = "File does not contain valid PEM data."
+			raise ValueError(msg)
 		return pemblocks
 
 def load_pem(pem):
@@ -636,9 +640,10 @@ def load_pem(pem):
 	from cryptography.hazmat.backends import default_backend
 	pem_type = re.match(b"-+BEGIN (.*?)-+[\r\n]", pem)
 	if pem_type is None:
-		raise ValueError("File is not a valid PEM-formatted file.")
+		msg = "File is not a valid PEM-formatted file."
+		raise ValueError(msg)
 	pem_type = pem_type.group(1)
-	if pem_type in (b"RSA PRIVATE KEY", b"PRIVATE KEY"):
+	if pem_type.endswith(b"PRIVATE KEY"):
 		return serialization.load_pem_private_key(pem, password=None, backend=default_backend())
 	if pem_type == b"CERTIFICATE":
 		return load_pem_x509_certificate(pem, default_backend())

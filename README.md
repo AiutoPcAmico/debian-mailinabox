@@ -7,8 +7,8 @@ Original project: [https://github.com/mailinabox/mailinabox](https://github.com/
 
 ## Version
 
-Current version: v67.2.0-AiutoPcAmico
-Upstream current implemented version: v67
+Current version: v71.1.0-AiutoPcAmico
+Upstream current implemented version: v71a
 
 ## Changes implemented
 
@@ -25,7 +25,7 @@ Upstream current implemented version: v67
 
 ## broken functionality
 
-- Duplicity (At the moment, I don't understand why the /etc/duplicity folder is not generated)
+- Duplicity (At the moment not installed because I didn't added the external repository)
 - OwnCloud
 
 ## Installation guide
@@ -33,8 +33,6 @@ Upstream current implemented version: v67
 Please, open the file "INSTALL.md" for the complete guide to install Debian Mail-in-a-Box by AiutoPcAmico
 
 ## Changelogs
-
-In this folder you can find 2 different changelog files:
 
 - CHANGELOG.md is from the upstream project
 - CHANGELOG_AiutoPcAmico.md relates to the changes made by AiutoPcAmico and strictly connected to the Debian porting

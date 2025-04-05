@@ -36,6 +36,7 @@ Now you can proceed with the installation of the mail server:
 ```bash
  git clone https://github.com/AiutoPcAmico/debian-mailinabox.git
  cd debian-mailinabox
+ chmod +x ./setyp/start.sh
  sudo ./setup/start.sh
 ```
 
@@ -48,7 +49,7 @@ The script now installs all necessary packages. It might take some time (up to 1
 At the end, you'll need to answer a few questions about configuring Debian Mail-in-a-Box.
 
 First of all you will be asked for an email address for configuring the mail server.
-Usually it is configured as ```me@[servername].[domain].[tld]``` but personally I prefer to change it to ```[anotherusername]@[domain].[tld]```. 
+Usually it is configured as ```me@[servername].[domain].[tld]``` but personally I prefer to change it to ```[anotherusername]@[domain].[tld]```.
 This way Mail-in-a-Box will take care of the mail server for the main domain and the administrator user will be unknown.
 
 Then you can indicate the subdomain where the mail server will be hosted (which you will reach via the Web GUI).

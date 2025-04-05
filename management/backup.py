@@ -7,15 +7,16 @@
 # 4) The stopped services are restarted.
 # 5) STORAGE_ROOT/backup/after-backup is executed if it exists.
 
-import os, os.path, shutil, glob, re, datetime, sys
+import os, os.path, re, datetime, sys
 import dateutil.parser, dateutil.relativedelta, dateutil.tz
+from datetime import date
 import rtyaml
 from exclusiveprocess import Lock
 
 from utils import load_environment, shell, wait_for_service
 
 def backup_status(env):
-	# If backups are dissbled, return no status.
+	# If backups are disabled, return no status.
 	config = get_backup_config(env)
 	if config["target"] == "off":
 		return { }
@@ -59,7 +60,7 @@ def backup_status(env):
 		"--archive-dir", backup_cache_dir,
 		"--gpg-options", "'--cipher-algo=AES256'",
 		"--log-fd", "1",
-		] + get_duplicity_additional_args(env) + [
+		*get_duplicity_additional_args(env),
 		get_duplicity_target_url(config)
 		],
 		get_duplicity_env_vars(env),
@@ -69,7 +70,7 @@ def backup_status(env):
 		# destination for the backups or the last backup job terminated unexpectedly.
 		raise Exception("Something is wrong with the backup: " + collection_status)
 	for line in collection_status.split('\n'):
-		if line.startswith(" full") or line.startswith(" inc"):
+		if line.startswith((" full", " inc")):
 			backup = parse_line(line)
 			backups[backup["date"]] = backup
 
@@ -157,6 +158,8 @@ def should_force_full(config, env):
 	# since the last full backup is greater than half the size
 	# of that full backup.
 	inc_size = 0
+	# Check if day of week is a weekend day
+	weekend = date.today().weekday()>=5
 	for bak in backup_status(env)["backups"]:
 		if not bak["full"]:
 			# Scan through the incremental backups cumulating
@@ -165,12 +168,14 @@ def should_force_full(config, env):
 		else:
 			# ...until we reach the most recent full backup.
 			# Return if we should to a full backup, which is based
-			# on the size of the increments relative to the full
-			# backup, as well as the age of the full backup.
-			if inc_size > .5*bak["size"]:
-				return True
-			if dateutil.parser.parse(bak["date"]) + datetime.timedelta(days=config["min_age_in_days"]*10+1) < datetime.datetime.now(dateutil.tz.tzlocal()):
-				return True
+			# on whether it is a weekend day, the size of the
+			# increments relative to the full backup, as well as
+			# the age of the full backup.
+			if weekend:
+				if inc_size > .5*bak["size"]:
+					return True
+				if dateutil.parser.parse(bak["date"]) + datetime.timedelta(days=config["min_age_in_days"]*10+1) < datetime.datetime.now(dateutil.tz.tzlocal()):
+					return True
 			return False
 	else:
 		# If we got here there are no (full) backups, so make one.
@@ -185,7 +190,7 @@ def get_passphrase(env):
 	# only needs to be 43 base64-characters to match AES256's key
 	# length of 32 bytes.
 	backup_root = os.path.join(env["STORAGE_ROOT"], 'backup')
-	with open(os.path.join(backup_root, 'secret_key.txt')) as f:
+	with open(os.path.join(backup_root, 'secret_key.txt'), encoding="utf-8") as f:
 		passphrase = f.readline().strip()
 	if len(passphrase) < 43: raise Exception("secret_key.txt's first line is too short!")
 
@@ -226,7 +231,7 @@ def get_duplicity_additional_args(env):
 			port = 22
 		if port is None:
 			port = 22
-						
+
 		return [
 			f"--ssh-options='-i /root/.ssh/id_rsa_miab -p {port}'",
 			f"--rsync-options='-e \"/usr/bin/ssh -oStrictHostKeyChecking=no -oBatchMode=yes -p {port} -i /root/.ssh/id_rsa_miab\"'",
@@ -257,8 +262,7 @@ def get_duplicity_env_vars(env):
 	return env
 
 def get_target_type(config):
-	protocol = config["target"].split(":")[0]
-	return protocol
+	return config["target"].split(":")[0]
 
 def perform_backup(full_backup):
 	env = load_environment()
@@ -321,10 +325,11 @@ def perform_backup(full_backup):
 			"--verbosity", "warning", "--no-print-statistics",
 			"--archive-dir", backup_cache_dir,
 			"--exclude", backup_root,
+			"--exclude", os.path.join(env["STORAGE_ROOT"], "owncloud-backup"),
 			"--volsize", "250",
 			"--gpg-options", "'--cipher-algo=AES256'",
-			"--allow-source-mismatch"
-			] + get_duplicity_additional_args(env) + [
+			"--allow-source-mismatch",
+			*get_duplicity_additional_args(env),
 			env["STORAGE_ROOT"],
 			get_duplicity_target_url(config),
 			],
@@ -345,7 +350,7 @@ def perform_backup(full_backup):
 		"--verbosity", "error",
 		"--archive-dir", backup_cache_dir,
 		"--force",
-		] + get_duplicity_additional_args(env) + [
+		*get_duplicity_additional_args(env),
 		get_duplicity_target_url(config)
 		],
 		get_duplicity_env_vars(env))
@@ -361,7 +366,7 @@ def perform_backup(full_backup):
 		"--verbosity", "error",
 		"--archive-dir", backup_cache_dir,
 		"--force",
-		] + get_duplicity_additional_args(env) + [
+		*get_duplicity_additional_args(env),
 		get_duplicity_target_url(config)
 		],
 		get_duplicity_env_vars(env))
@@ -400,7 +405,8 @@ def run_duplicity_verification():
 		"--compare-data",
 		"--archive-dir", backup_cache_dir,
 		"--exclude", backup_root,
-		] + get_duplicity_additional_args(env) + [
+		"--exclude", os.path.join(env["STORAGE_ROOT"], "owncloud-backup"),
+		*get_duplicity_additional_args(env),
 		get_duplicity_target_url(config),
 		env["STORAGE_ROOT"],
 	], get_duplicity_env_vars(env))
@@ -413,9 +419,9 @@ def run_duplicity_restore(args):
 		"/usr/bin/duplicity",
 		"restore",
 		"--archive-dir", backup_cache_dir,
-		] + get_duplicity_additional_args(env) + [
-		get_duplicity_target_url(config)
-		] + args,
+		*get_duplicity_additional_args(env),
+		get_duplicity_target_url(config),
+		*args],
 		get_duplicity_env_vars(env))
 
 def print_duplicity_command():
@@ -427,7 +433,7 @@ def print_duplicity_command():
 		print(f"export {k}={shlex.quote(v)}")
 	print("duplicity", "{command}", shlex.join([
 		"--archive-dir", backup_cache_dir,
-		] + get_duplicity_additional_args(env) + [
+		*get_duplicity_additional_args(env),
 		get_duplicity_target_url(config)
 		]))
 
@@ -483,21 +489,22 @@ def list_target_files(config):
 			if 'Permission denied (publickey).' in listing:
 				reason = "Invalid user or check you correctly copied the SSH key."
 			elif 'No such file or directory' in listing:
-				reason = "Provided path {} is invalid.".format(target_path)
+				reason = f"Provided path {target_path} is invalid."
 			elif 'Network is unreachable' in listing:
-				reason = "The IP address {} is unreachable.".format(target.hostname)
+				reason = f"The IP address {target.hostname} is unreachable."
 			elif 'Could not resolve hostname' in listing:
-				reason = "The hostname {} cannot be resolved.".format(target.hostname)
+				reason = f"The hostname {target.hostname} cannot be resolved."
 			else:
-				reason = "Unknown error." \
-						"Please check running 'management/backup.py --verify'" \
-						"from mailinabox sources to debug the issue."
-			raise ValueError("Connection to rsync host failed: {}".format(reason))
+				reason = ("Unknown error."
+						"Please check running 'management/backup.py --verify'"
+						"from mailinabox sources to debug the issue.")
+			msg = f"Connection to rsync host failed: {reason}"
+			raise ValueError(msg)
 
 	elif target.scheme == "s3":
 		import boto3.s3
 		from botocore.exceptions import ClientError
-		
+
 		# separate bucket from path in target
 		bucket = target.path[1:].split('/')[0]
 		path = '/'.join(target.path[1:].split('/')[1:]) + '/'
@@ -507,14 +514,18 @@ def list_target_files(config):
 			path = ''
 
 		if bucket == "":
-			raise ValueError("Enter an S3 bucket name.")
+			msg = "Enter an S3 bucket name."
+			raise ValueError(msg)
 
 		# connect to the region & bucket
 		try:
-			s3 = boto3.client('s3', \
-				endpoint_url=f'https://{target.hostname}', \
-				aws_access_key_id=config['target_user'], \
-				aws_secret_access_key=config['target_pass'])
+			if config['target_user'] == "" and config['target_pass'] == "":
+				s3 = boto3.client('s3', endpoint_url=f'https://{target.hostname}')
+			else:
+				s3 = boto3.client('s3', \
+					endpoint_url=f'https://{target.hostname}', \
+					aws_access_key_id=config['target_user'], \
+					aws_secret_access_key=config['target_pass'])
 			bucket_objects = s3.list_objects_v2(Bucket=bucket, Prefix=path)['Contents']
 			backup_list = [(key['Key'][len(path):], key['Size']) for key in bucket_objects]
 		except ClientError as e:
@@ -525,7 +536,7 @@ def list_target_files(config):
 		from b2sdk.v1.exception import NonExistentBucket
 		info = InMemoryAccountInfo()
 		b2_api = B2Api(info)
-		
+
 		# Extract information from target
 		b2_application_keyid = target.netloc[:target.netloc.index(':')]
 		b2_application_key = urllib.parse.unquote(target.netloc[target.netloc.index(':')+1:target.netloc.index('@')])
@@ -534,8 +545,9 @@ def list_target_files(config):
 		try:
 			b2_api.authorize_account("production", b2_application_keyid, b2_application_key)
 			bucket = b2_api.get_bucket_by_name(b2_bucket)
-		except NonExistentBucket as e:
-			raise ValueError("B2 Bucket does not exist. Please double check your information!")
+		except NonExistentBucket:
+			msg = "B2 Bucket does not exist. Please double check your information!"
+			raise ValueError(msg)
 		return [(key.file_name, key.size) for key, _ in bucket.ls()]
 
 	else:
@@ -556,7 +568,7 @@ def backup_set_custom(env, target, target_user, target_pass, min_age):
 
 	# Validate.
 	try:
-		if config["target"] not in ("off", "local"):
+		if config["target"] not in {"off", "local"}:
 			# these aren't supported by the following function, which expects a full url in the target key,
 			# which is what is there except when loading the config prior to saving
 			list_target_files(config)
@@ -578,9 +590,9 @@ def get_backup_config(env, for_save=False, for_ui=False):
 
 	# Merge in anything written to custom.yaml.
 	try:
-		with open(os.path.join(backup_root, 'custom.yaml'), 'r') as f:
+		with open(os.path.join(backup_root, 'custom.yaml'), encoding="utf-8") as f:
 			custom_config = rtyaml.load(f)
-		if not isinstance(custom_config, dict): raise ValueError() # caught below
+		if not isinstance(custom_config, dict): raise ValueError # caught below
 		config.update(custom_config)
 	except:
 		pass
@@ -604,18 +616,17 @@ def get_backup_config(env, for_save=False, for_ui=False):
 		config["target"] = "file://" + config["file_target_directory"]
 	ssh_pub_key = os.path.join('/root', '.ssh', 'id_rsa_miab.pub')
 	if os.path.exists(ssh_pub_key):
-		with open(ssh_pub_key, 'r') as f:
+		with open(ssh_pub_key, encoding="utf-8") as f:
 			config["ssh_pub_key"] = f.read()
 
 	return config
 
 def write_backup_config(env, newconfig):
 	backup_root = os.path.join(env["STORAGE_ROOT"], 'backup')
-	with open(os.path.join(backup_root, 'custom.yaml'), "w") as f:
+	with open(os.path.join(backup_root, 'custom.yaml'), "w", encoding="utf-8") as f:
 		f.write(rtyaml.dump(newconfig))
 
 if __name__ == "__main__":
-	import sys
 	if sys.argv[-1] == "--verify":
 		# Run duplicity's verification command to check a) the backup files
 		# are readable, and b) report if they are up to date.
@@ -624,7 +635,7 @@ if __name__ == "__main__":
 	elif sys.argv[-1] == "--list":
 		# List the saved backup files.
 		for fn, size in list_target_files(get_backup_config(load_environment())):
-			print("{}\t{}".format(fn, size))
+			print(f"{fn}\t{size}")
 
 	elif sys.argv[-1] == "--status":
 		# Show backup status.
